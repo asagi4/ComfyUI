@@ -28,6 +28,11 @@ function getOrientationMenu(value, options, e, menu, node) {
 					}
 					node.outputs[0].dir = dir;
 				}
+				// all inputs must have the same direction
+				for (let i = 1; i < node.inputs.length; i++) {
+					node.inputs[i].dir = node.inputs[0].dir;
+					node.outputs[i].dir = node.outputs[0].dir;
+				}
 		
 				node.applyOrientation();
 			}
@@ -44,12 +49,17 @@ app.registerExtension({
 					this.properties = {};
 				}
 				this.properties.showOutputText = RerouteNode.defaultVisibility;
+				// these will already exist if this is a clone; don't double-add
+				if (!this.inputs) {
+					this.addInput("", "*", {nameLocked: true});
+					this.inputs[0].dir = LiteGraph.LEFT;
+				}
 
-				this.addInput("", "*", {nameLocked: true});
-				this.addOutput("", "*", {nameLocked: true});
+				if (!this.outputs) {
+					this.addOutput("", "*", {nameLocked: true});
+					this.outputs[0].dir = LiteGraph.RIGHT;
+				}
 				
-				this.inputs[0].dir = LiteGraph.LEFT;
-				this.outputs[0].dir = LiteGraph.RIGHT;
 
 				this.onResize = function(_) {
 					this.applyOrientation();
@@ -97,10 +107,10 @@ app.registerExtension({
 					// Prevent multiple connections to different types when we have no input
 					if (connected && type === LiteGraph.OUTPUT) {
 						// Ignore wildcard nodes as these will be updated to real types
-						const types = new Set(this.outputs[0].links.map((l) => app.graph.links[l].type).filter((t) => t !== "*"));
+						const types = new Set(this.outputs[index].links.map((l) => app.graph.links[l].type).filter((t) => t !== "*"));
 						if (types.size > 1) {
-							for (let i = 0; i < this.outputs[0].links.length - 1; i++) {
-								const linkId = this.outputs[0].links[i];
+							for (let i = 0; i < this.outputs[index].links.length - 1; i++) {
+								const linkId = this.outputs[index].links[i];
 								const link = app.graph.links[linkId];
 								const node = app.graph.getNodeById(link.target_id);
 								node.disconnectInput(link.target_slot);
@@ -108,113 +118,9 @@ app.registerExtension({
 						}
 					}
 
-					// Find root input
-					let currentNode = this;
-					let updateNodes = [];
-					let inputType = null;
-					let inputNode = null;
-					while (currentNode) {
-						updateNodes.unshift(currentNode);
-						const linkId = currentNode.inputs[0].link;
-						if (linkId !== null) {
-							const link = app.graph.links[linkId];
-							const node = app.graph.getNodeById(link.origin_id);
-							const type = node.constructor.type;
-							if (type === "Reroute") {
-								if (node === this) {
-									// We've found a circle
-									currentNode.disconnectInput(link.target_slot);
-									currentNode = null;
-								}
-								else {
-									// Move the previous node
-									currentNode = node;
-								}
-							} else {
-								// We've found the end
-								inputNode = currentNode;
-								inputType = node.outputs[link.origin_slot]?.type ?? null;
-								break;
-							}
-						} else {
-							// This path has no input node
-							currentNode = null;
-							break;
-						}
+					for (let i = 0; i < this.inputs.length; i++) {
+						this.resolveTypes(i)
 					}
-
-					// Find all outputs
-					const nodes = [this];
-					let outputType = null;
-					while (nodes.length) {
-						currentNode = nodes.pop();
-						const outputs = (currentNode.outputs ? currentNode.outputs[0].links : []) || [];
-						if (outputs.length) {
-							for (const linkId of outputs) {
-								const link = app.graph.links[linkId];
-
-								// When disconnecting sometimes the link is still registered
-								if (!link) continue;
-
-								const node = app.graph.getNodeById(link.target_id);
-								const type = node.constructor.type;
-
-								if (type === "Reroute") {
-									// Follow reroute nodes
-									nodes.push(node);
-									updateNodes.push(node);
-								} else {
-									// We've found an output
-									const nodeOutType = node.inputs && node.inputs[link?.target_slot] && node.inputs[link.target_slot].type ? node.inputs[link.target_slot].type : null;
-									if (inputType && nodeOutType !== inputType) {
-										// The output doesnt match our input so disconnect it
-										node.disconnectInput(link.target_slot);
-									} else {
-										outputType = nodeOutType;
-									}
-								}
-							}
-						} else {
-							// No more outputs for this path
-						}
-					}
-
-					const displayType = inputType || outputType || "*";
-					const color = LGraphCanvas.link_type_colors[displayType];
-
-					// Update the types of each node
-					for (const node of updateNodes) {
-						// If we dont have an input type we are always wildcard but we'll show the output type
-						// This lets you change the output link to a different type and all nodes will update
-						node.outputs[0].type = inputType || "*";
-						node.__outputType = displayType;
-						node.size = node.computeSize();
-						node.applyOrientation();
-
-						for (const l of node.outputs[0].links || []) {
-							const link = app.graph.links[l];
-							if (link) {
-								link.color = color;
-							}
-						}
-					}
-
-					if (inputNode) {
-						const link = app.graph.links[inputNode.inputs[0].link];
-						if (link) {
-							link.color = color;
-						}
-					}
-				};
-
-				this.clone = function () {
-					const cloned = RerouteNode.prototype.clone.apply(this);
-					let dir = this.outputs[0].dir
-					cloned.removeOutput(0);
-					cloned.addOutput(this.properties.showOutputText ? "*" : "", "*", {nameLocked: true});
-					cloned.outputs[0].dir = dir
-					cloned.size = cloned.computeSize();
-					return cloned;
 				};
 
 				// This node is purely frontend and does not impact the resulting prompt so should not be serialized
@@ -223,8 +129,122 @@ app.registerExtension({
 				this.applyOrientation();
 			}
 
+			resolveTypes(i) {
+				let currentNode = this;
+				let updateNodes = [];
+				let inputType = null;
+				let inputNode = null;
+				while (currentNode) {
+					updateNodes.unshift({node: currentNode, "slot": i});
+					const linkId = currentNode.inputs[i].link;
+					if (linkId !== null) {
+						const link = app.graph.links[linkId];
+						const node = app.graph.getNodeById(link.origin_id);
+						const type = node.constructor.type;
+						if (type === "Reroute") {
+							if (node === this) {
+								// We've found a circle
+								currentNode.disconnectInput(link.target_slot);
+								currentNode = null;
+							}
+							else {
+								// Move the previous node
+								currentNode = node;
+							}
+						} else {
+							// We've found the end
+							inputNode = currentNode;
+							inputType = node.outputs[link.origin_slot]?.type ?? null;
+							break;
+						}
+					} else {
+						// This path has no input node
+						currentNode = null;
+						break;
+					}
+				}
+
+				// Find all outputs
+				const nodes = [{node: this, slot: i}];
+				let outputType = null;
+				while (nodes.length) {
+					currentNode = nodes.pop();
+					const outputs = (currentNode.node.outputs ? currentNode.node.outputs[currentNode.slot].links : []) || [];
+					if (outputs.length) {
+						for (const linkId of outputs) {
+							const link = app.graph.links[linkId];
+
+							// When disconnecting sometimes the link is still registered
+							if (!link) continue;
+
+							const node = app.graph.getNodeById(link.target_id);
+							const type = node.constructor.type;
+
+							if (type === "Reroute") {
+								// Follow reroute nodes
+								nodes.push({node: node, slot: link.target_slot});
+								updateNodes.push({node: node, slot: link.target_slot});
+							} else {
+								// We've found an output
+								const nodeOutType = node.inputs && node.inputs[link?.target_slot] && node.inputs[link.target_slot].type ? node.inputs[link.target_slot].type : null;
+								if (inputType && nodeOutType !== inputType) {
+									// The output doesnt match our input so disconnect it
+									node.disconnectInput(link.target_slot);
+								} else {
+									outputType = nodeOutType;
+								}
+							}
+						}
+					} else {
+						// No more outputs for this path
+					}
+				}
+
+				const displayType = inputType || outputType || "*";
+				const color = LGraphCanvas.link_type_colors[displayType];
+
+				// Update the types of each node
+				for (const nodeslot of updateNodes) {
+					const node = nodeslot.node
+					const slot = nodeslot.slot;
+					// If we dont have an input type we are always wildcard but we'll show the output type
+					// This lets you change the output link to a different type and all nodes will update
+					node.outputs[slot].type = inputType || "*";
+					node.__outputType = displayType;
+					node.size = node.computeSize();
+					node.applyOrientation();
+
+					for (const l of node.outputs[slot].links || []) {
+						const link = app.graph.links[l];
+						if (link) {
+							link.color = color;
+						}
+					}
+				}
+
+				if (inputNode) {
+					const link = app.graph.links[inputNode.inputs[i].link];
+					if (link) {
+						link.color = color;
+					}
+				}
+
+			}
+
 			getExtraMenuOptions(_, options) {
 				options.unshift(
+					{
+						content: "Add input",
+						callback: () => {
+							var len = this.inputs.length
+							this.addInput("", "*");
+							this.addOutput("", "*");
+							this.inputs[len].dir = this.inputs[0].dir;
+							this.outputs[len].dir = this.outputs[0].dir;
+							this.size = this.computeSize();
+							this.applyOrientation();
+						}
+					},
 					{
 						content: (this.properties.showOutputText ? "Hide" : "Show") + " Type",
 						callback: () => {
@@ -257,39 +277,52 @@ app.registerExtension({
 
 			applyOrientation() {
 				// Place inputs/outputs based on the direction
-				function processInOut(node, slot) {
+				function processInOut(node, slot, index, slotcount) {
 					if (!slot) { return; } // weird copy/paste fix
 
 					const horizontal = ([LiteGraph.UP, LiteGraph.DOWN].indexOf(slot.dir) > -1);
 					const reversed = ([LiteGraph.DOWN, LiteGraph.RIGHT].indexOf(slot.dir) > -1);
+					const sections = slotcount+1;
+					const mypos = index+1;
+    
 
 					if (horizontal) {
-						slot.pos = [node.size[0] / 2, reversed ? node.size[1]:0];
+						slot.pos = [(node.size[0] / sections)*mypos, reversed ? node.size[1]:0];
 					} else {
-						slot.pos = [reversed ? node.size[0]:0, node.size[1] / 2];
+						slot.pos = [reversed ? node.size[0]:0, (node.size[1] / sections)*mypos];
 					}
 				}
 
-				processInOut(this, this.inputs[0]);
-				processInOut(this, this.outputs[0]);
+				for (let i = 0; i < this.inputs.length; i++) {
+					processInOut(this, this.inputs[i], i, this.inputs.length);
+					processInOut(this, this.outputs[i], i, this.inputs.length);
+				}
 
 				app.graph.setDirtyCanvas(true, true);
 			}
 
 			getDisplayName() {
-				let displayName = this.__outputType;
+				let displayName = this.__outputType || "Reroute"
 				if (this.title !== "Reroute" && this.title !== "") {
-					displayName = this.title;
+					displayName = this.title || "Reroute";
 				}
 				return displayName;
 			}
 
 			computeSize() {
+				const output_horizontal = this.outputs && ([LiteGraph.LEFT, LiteGraph.RIGHT].indexOf(this.outputs[0].dir) > -1);
+				const input_horizontal = this.inputs && ([LiteGraph.LEFT, LiteGraph.RIGHT].indexOf(this.inputs[0].dir) > -1);
+				const outputs = this.inputs?.length || 1;
+				const only_vertical = !output_horizontal && !input_horizontal;
+				const only_horizontal = output_horizontal && input_horizontal;
+				const vert_needed = only_vertical ? 35 : 25 + outputs * 15;
+				const horiz_needed = only_horizontal ? 35 : 25 + 15 * outputs;
+				
 				return [
 					this.properties.showOutputText && this.outputs
-						? Math.max(75, LiteGraph.NODE_TEXT_SIZE * this.getDisplayName().length * 0.6)
-						: 75,
-					25,
+						? Math.max(horiz_needed, LiteGraph.NODE_TEXT_SIZE * this.getDisplayName().length * 0.6)
+						: horiz_needed,
+					vert_needed
 				];
 			}
 
