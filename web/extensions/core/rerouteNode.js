@@ -5,13 +5,6 @@ import { app } from "../../scripts/app.js";
 // Context menu to change input/output orientation
 function getOrientationMenu(value, options, e, menu, node) {
 	const isInput = value.options.isInput
-	const takenSlot = (isInput ? node.outputs[0].dir:node.inputs[0].dir) -1
-
-	let availableDir = ["Up" ,"Down", "Left", "Right"]
-	let availableValue = [LiteGraph.UP, LiteGraph.DOWN, LiteGraph.LEFT, LiteGraph.RIGHT]
-
-	availableDir.splice(takenSlot, 1);
-	availableValue.splice(takenSlot, 1);
 
 	new LiteGraph.ContextMenu(
 		availableDir,
@@ -19,16 +12,20 @@ function getOrientationMenu(value, options, e, menu, node) {
 			event: e,
 			parentMenu: menu,
 			node: node,
-			callback: (v, options, mouse_event, menu, node) => {
+			callback: (dir, options, mouse_event, menu, node) => {
 				if (!node) {
 					return;
 				}
 		
-				let dir = availableValue[Object.values(availableDir).indexOf(v)];
-				
 				if (isInput) {
+					if (node.outputs[0].dir === dir) {
+						node.outputs[0].dir = node.inputs[0].dir;
+					}
 					node.inputs[0].dir = dir;
 				} else {
+					if (node.inputs[0].dir === dir) {
+						node.inputs[0].dir = node.outputs[0].dir;
+					}
 					node.outputs[0].dir = dir;
 				}
 		
